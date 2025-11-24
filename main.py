@@ -14,35 +14,38 @@ TCP_PORT   = 9910
 FTP_USER = "molink"
 FTP_PASS = "molinkadmin"
 
+os.system("sudo killall wpa_supplicant")
+os.system("sudo systemctl stop wpa_supplicant")
+os.system("sudo systemctl disable wpa_supplicant")
+os.system("sudo ip link set wlan0 down")
+os.system("sudo ip link set wlan0 up")
 
 # -------------------------------------------------------------------
 # WIFI: Connect ke Hotspot Device
 # -------------------------------------------------------------------
 def wifi_connect():
-    print("\n[WiFi] Menghubungkan ke hotspot device...")
+    print("[WiFi] Connecting to device AP...")
 
-    # Konfigurasi harus tanpa indentasi
-    config = f"""network={{
-    ssid="{DEVICE_SSID}"
-    psk="{DEVICE_PASS}"
-}}"""
+    os.system("sudo killall wpa_supplicant")
+    os.system("sudo systemctl stop wpa_supplicant")
+    os.system("sudo ip link set wlan0 down")
+    os.system("sudo ip link set wlan0 up")
 
-    # Simpan file konfigurasi sementara
+    config = f'''network={{
+        ssid="{DEVICE_SSID}"
+        psk="{DEVICE_PASS}"
+    }}'''
+
     with open("/tmp/device_wifi.conf", "w") as f:
         f.write(config)
 
-    # Stop service bawaan agar tidak bentrok
-    os.system("sudo systemctl stop wpa_supplicant")
-
-    # Jalankan wpa_supplicant manual
     os.system("sudo wpa_supplicant -B -i wlan0 -c /tmp/device_wifi.conf")
 
-    print("[WiFi] Request DHCP...")
     time.sleep(2)
     os.system("sudo dhclient -r wlan0")
     os.system("sudo dhclient wlan0")
+    time.sleep(2)
 
-    time.sleep(3)
 
 
 def wifi_has_ip():
@@ -98,14 +101,15 @@ def tcp_send(cmd_type, data=""):
 # -------------------------------------------------------------------
 def ftp_connect():
     print("[FTP] Connecting...")
-    ftp = FTP()
-    ftp.connect(DEVICE_IP, 21, timeout=10)
+    ftp = FTP(timeout=30)
+    ftp.connect(DEVICE_IP, 21)
     ftp.login(FTP_USER, FTP_PASS)
     print("[FTP] Connected!")
     return ftp
 
 
 def ftp_upload(local_path, remote_name, folder="/sd_card"):
+    ftp.sock.settimeout(30)
     ftp = ftp_connect()
     ftp.cwd(folder)
     print(f"[FTP] Uploading {local_path} → {folder}/{remote_name}")
@@ -153,7 +157,7 @@ time.sleep(1)
 # FTP UPLOAD FILE
 # ---------------------------
 print("\n=== UPLOAD VIA FTP ===")
-ftp_upload("/home/pi/vid1.mp4", "vid1.mp4")
+ftp_upload("/home/pi/fan-display/vid1.mp4", "vid1.mp4")
 
 time.sleep(1)
 
@@ -162,5 +166,10 @@ time.sleep(1)
 # ---------------------------
 print("\n=== CMD 0x05: UPLOAD COMPLETE ===")
 tcp_send(0x05)
+
+# Restore normal wifi
+os.system("sudo systemctl enable wpa_supplicant")
+os.system("sudo systemctl start wpa_supplicant")
+os.system("sudo wpa_cli -i wlan0 reconfigure")
 
 print("\n=== SELESAI ===")
