@@ -1,77 +1,79 @@
-import os
 import socket
+import struct
+from ftplib import FTP
 import time
-import subprocess
 
-WIFI_SSID = "NamaWiFi"
-WIFI_PSK  = "PasswordWiFi"
+DEVICE_IP = "192.168.10.123"
+TCP_PORT = 9910
 
-SERVER_IP   = "192.168.1.10"   # IP TCP server
-SERVER_PORT = 5000             # port TCP server
+FTP_USER = "molink"
+FTP_PASS = "molinkadmin"
 
-def wifi_connected():
-    """Cek apakah wlan0 sudah punya IP."""
-    try:
-        output = subprocess.check_output("hostname -I", shell=True).decode()
-        return "192." in output or "10." in output or "172." in output
-    except:
-        return False
+# ========== FUNGSI BUAT COMMAND PACKET ==========
+def build_cmd(cmd_type, data_str=""):
+    data_bytes = data_str.encode()
+    length = len(data_bytes)
 
-def connect_wifi():
-    """Perintah CLI untuk menghubungkan WiFi."""
-    print("[WiFi] Menghubungkan ke WiFi...")
+    packet = b""
+    packet += b"\x7E"                          # head
+    packet += struct.pack(">I", length)         # 4-byte big-endian length
+    packet += bytes([cmd_type])                 # command type
+    packet += data_bytes                        # payload
+    packet += b"\x7F"                           # tail
 
-    config = f"""
-network={{
-    ssid="{WIFI_SSID}"
-    psk="{WIFI_PSK}"
-}}
-"""
-    with open("/tmp/wifi.conf", "w") as f:
-        f.write(config)
+    return packet
 
-    os.system("sudo wpa_supplicant -B -i wlan0 -c /tmp/wifi.conf")
-    time.sleep(5)
-    os.system("sudo dhclient wlan0")
-    time.sleep(3)
+# ========== KIRIM COMMAND DAN TERIMA BALASAN ==========
+def tcp_send_command(cmd_type, data=""):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.connect((DEVICE_IP, TCP_PORT))
 
-def connect_tcp():
-    """Menyambungkan ke TCP server."""
-    while True:
-        try:
-            print("[TCP] Menghubungkan ke server...")
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5)
-            sock.connect((SERVER_IP, SERVER_PORT))
-            print("[TCP] Terhubung ke server!")
+    packet = build_cmd(cmd_type, data)
+    sock.sendall(packet)
 
-            while True:
-                msg = "Hello from Raspberry Pi Zero"
-                sock.sendall(msg.encode())
-                print("[TCP] Sent:", msg)
+    resp = sock.recv(2048)
+    sock.close()
 
-                try:
-                    data = sock.recv(1024)
-                    print("[TCP] Received:", data.decode())
-                except:
-                    print("[TCP] Tidak ada balasan")
+    print("RESP RAW:", resp)
+    return resp
 
-                time.sleep(2)
+# ========== FTP UPLOAD / DOWNLOAD ==========
+def ftp_connect():
+    ftp = FTP()
+    ftp.connect(DEVICE_IP, 21)
+    ftp.login(FTP_USER, FTP_PASS)
+    print("FTP connected.")
+    return ftp
 
-        except Exception as e:
-            print("[TCP] Error:", e)
-            print("[TCP] Reconnecting in 3s...")
-            time.sleep(3)
+def ftp_upload(local_file, remote_file):
+    ftp = ftp_connect()
+    with open(local_file, "rb") as f:
+        ftp.storbinary(f"STOR {remote_file}", f)
+    ftp.quit()
+    print("Upload success:", remote_file)
 
+def ftp_download(remote_file, local_file):
+    ftp = ftp_connect()
+    with open(local_file, "wb") as f:
+        ftp.retrbinary(f"RETR {remote_file}", f.write)
+    ftp.quit()
+    print("Download success:", remote_file)
 
-def main():
-    while True:
-        if wifi_connected():
-            print("[WiFi] Sudah terhubung ke jaringan!")
-            connect_tcp()
-        else:
-            print("[WiFi] Tidak ada koneksi. Mencoba konek...")
-            connect_wifi()
-            time.sleep(5)
+# ==================== DEMO ====================
+print("=== Request device info (CMD 0x01) ===")
+tcp_send_command(0x01)
 
-main()
+time.sleep(1)
+
+print("=== Notify device before upload (CMD 0x03) ===")
+tcp_send_command(0x03, 'DisplayImageIdData=test.mp4')
+
+time.sleep(1)
+
+print("=== Upload file via FTP like FileZilla ===")
+ftp_upload("/home/pi/video.mp4", "video.mp4")
+
+time.sleep(1)
+
+print("=== Notify device upload done (CMD 0x05) ===")
+tcp_send_command(0x05)
