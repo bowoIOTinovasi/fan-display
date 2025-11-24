@@ -5,11 +5,11 @@ import socket
 import struct
 from ftplib import FTP
 
-DEVICE_SSID = "Z7H2_D5E53327"  # ganti sesuai device kamu
-DEVICE_PASS = "12345678"
+DEVICE_SSID = "Z7H2_D5E53327"      # SSID AP device
+DEVICE_PASS = "12345678"           # Password AP device
 
-DEVICE_IP = "192.168.10.123"  # default IP device dalam mode AP
-TCP_PORT = 9910
+DEVICE_IP = "192.168.10.123"       # Default AP IP device
+TCP_PORT   = 9910
 
 FTP_USER = "molink"
 FTP_PASS = "molinkadmin"
@@ -19,39 +19,38 @@ FTP_PASS = "molinkadmin"
 # WIFI: Connect ke Hotspot Device
 # -------------------------------------------------------------------
 def wifi_connect():
-    print("[WiFi] Menghubungkan ke hotspot device...")
+    print("\n[WiFi] Menghubungkan ke hotspot device...")
 
-    # Buat file config wpa_supplicant sementara
-    config = f"""
-    network={{
-        ssid="{DEVICE_SSID}"
-        psk="{DEVICE_PASS}"
-    }}
-    """
-    
+    # Konfigurasi harus tanpa indentasi
+    config = f"""network={{
+    ssid="{DEVICE_SSID}"
+    psk="{DEVICE_PASS}"
+}}"""
+
+    # Simpan file konfigurasi sementara
     with open("/tmp/device_wifi.conf", "w") as f:
         f.write(config)
 
-    # Matikan service wpa_supplicant bawaan
+    # Stop service bawaan agar tidak bentrok
     os.system("sudo systemctl stop wpa_supplicant")
 
     # Jalankan wpa_supplicant manual
     os.system("sudo wpa_supplicant -B -i wlan0 -c /tmp/device_wifi.conf")
 
-    # Ambil IP dari DHCP
-    time.sleep(3)
+    print("[WiFi] Request DHCP...")
+    time.sleep(2)
+    os.system("sudo dhclient -r wlan0")
     os.system("sudo dhclient wlan0")
 
-    print("[WiFi] Menunggu IP...")
-    time.sleep(5)
+    time.sleep(3)
 
 
 def wifi_has_ip():
-    """Cek apakah sudah dapat IP 192.168.10.xxx"""
+    """Cek apakah wlan0 sudah punya IP 192.168.10.xxx"""
     try:
-        ip = subprocess.check_output("hostname -I", shell=True).decode()
-        print("[WiFi] IP Saat ini:", ip)
-        return "192.168.10." in ip
+        ip = subprocess.check_output("hostname -I", shell=True).decode().strip()
+        print("[WiFi] IP saat ini:", ip)
+        return ip.startswith("192.168.10.")
     except:
         return False
 
@@ -62,46 +61,60 @@ def wifi_has_ip():
 def build_cmd(cmd_type, data_str=""):
     data_bytes = data_str.encode()
     length = len(data_bytes)
-    packet = b""
-    packet += b"\x7E"                       # head
-    packet += struct.pack(">I", length)     # 4 byte length
-    packet += bytes([cmd_type])             # cmd byte
-    packet += data_bytes                    # data
-    packet += b"\x7F"                       # tail
+    packet = (
+        b"\x7E" +
+        struct.pack(">I", length) +
+        bytes([cmd_type]) +
+        data_bytes +
+        b"\x7F"
+    )
     return packet
 
 
 def tcp_send(cmd_type, data=""):
+    print(f"[TCP] Send CMD {cmd_type:02X} ...")
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect((DEVICE_IP, TCP_PORT))
+    sock.settimeout(5)
 
-    packet = build_cmd(cmd_type, data)
-    sock.sendall(packet)
+    try:
+        sock.connect((DEVICE_IP, TCP_PORT))
+        packet = build_cmd(cmd_type, data)
+        sock.sendall(packet)
 
-    resp = sock.recv(2048)
-    sock.close()
+        resp = sock.recv(2048)
+        print("[TCP] RESP:", resp)
 
-    print("[TCP] RESP RAW:", resp)
-    return resp
+        sock.close()
+        return resp
+
+    except Exception as e:
+        print("[TCP] ERROR:", e)
+        sock.close()
+        return None
 
 
 # -------------------------------------------------------------------
-# FTP
+# FTP HANDLING
 # -------------------------------------------------------------------
 def ftp_connect():
+    print("[FTP] Connecting...")
     ftp = FTP()
-    ftp.connect(DEVICE_IP, 21)
+    ftp.connect(DEVICE_IP, 21, timeout=10)
     ftp.login(FTP_USER, FTP_PASS)
-    print("[FTP] connected.")
+    print("[FTP] Connected!")
     return ftp
 
 
-def ftp_upload(local_path, remote_name):
+def ftp_upload(local_path, remote_name, folder="/sd_card"):
     ftp = ftp_connect()
+    ftp.cwd(folder)
+    print(f"[FTP] Uploading {local_path} → {folder}/{remote_name}")
+
     with open(local_path, "rb") as f:
         ftp.storbinary(f"STOR {remote_name}", f)
+
     ftp.quit()
-    print("[FTP] Upload done:", remote_name)
+    print("[FTP] Upload done.")
 
 
 # -------------------------------------------------------------------
@@ -111,32 +124,43 @@ print("=== CONNECTING TO DEVICE HOTSPOT ===")
 
 wifi_connect()
 
+# Tunggu sampai dapat IP
 while not wifi_has_ip():
-    print("[WiFi] Belum dapat IP 192.168.10.x, mencoba ulang...")
+    print("[WiFi] Belum dapat IP 192.168.10.x, retry...")
     wifi_connect()
+    time.sleep(2)
 
-print("[WiFi] Terhubung ke hotspot device.")
+print("[WiFi] Terhubung ke hotspot device!")
+
 
 # ---------------------------
-# Tes command 0x01 (device info)
+# CMD 0x01 → Minta info
 # ---------------------------
-print("\n=== REQUEST DEVICE INFO (CMD 0x01) ===")
+print("\n=== CMD 0x01: REQUEST DEVICE INFO ===")
 tcp_send(0x01)
 
-# ---------------------------
-# Notify before upload
-# ---------------------------
-print("\n=== SEND CMD 0x03 (notify before upload) ===")
-tcp_send(0x03, "DisplayImageIdData=test.mp4")
+time.sleep(1)
 
 # ---------------------------
-# Upload file via FTP
+# CMD 0x03 → Notify sebelum upload
+# ---------------------------
+print("\n=== CMD 0x03: NOTIFY BEFORE UPLOAD ===")
+tcp_send(0x03, "DisplayImageIdData=vid1.mp4")
+
+time.sleep(1)
+
+# ---------------------------
+# FTP UPLOAD FILE
 # ---------------------------
 print("\n=== UPLOAD VIA FTP ===")
-ftp_upload("/home/pi/test.mp4", "test.mp4")
+ftp_upload("/home/pi/vid1.mp4", "vid1.mp4")
+
+time.sleep(1)
 
 # ---------------------------
-# Notify upload complete (CMD 0x05)
+# CMD 0x05 → Notify upload selesai
 # ---------------------------
-print("\n=== SEND CMD 0x05 (upload done) ===")
+print("\n=== CMD 0x05: UPLOAD COMPLETE ===")
 tcp_send(0x05)
+
+print("\n=== SELESAI ===")
